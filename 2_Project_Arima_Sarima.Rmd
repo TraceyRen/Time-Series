@@ -1,0 +1,496 @@
+---
+title: "Final Project"
+output: pdf_document
+---
+
+```{r}
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+```
+```{r}
+atl = read.csv("Atlanta_data.csv", head = TRUE)
+atl
+```
+
+
+```{r}
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%Y-%m-%d')
+#temp <- ts(atl$tavg, start=c(2002,4,1), freq=365)
+temp = xts(atl$tavg, atl$time)
+temp = apply.weekly(temp, mean, na.rm=TRUE)
+temp <- ts(temp, start=c(2002,4,1), freq=52)
+# plot time series
+ts.plot(temp,ylab="daily temprature", main="Atlanta Weekly Temprature Time Series")
+acf(temp, main="ACF:Atlanta Weekly Temprature", na.action = na.pass, lag.max=52*2)
+```
+The plot of daily temperature value clearly shows cyclic patterns indicating seasonality in the data which is expected as the temperature is known to be dependent on the time of the year. In terms of trend there is no clear upward or downward in the original time series, however the ACF plot shows that there might be a trend in the data as well. Hence it would be worth fitting trend and seasonality components to the data and perform EDA on the residuals.
+
+
+
+```{r}
+time.pts = c(1:length(temp))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+
+## splines regression to fit daily data 
+temp.gam = gam(temp~s(time.pts))
+temp.gam.fit = ts(fitted(temp.gam), start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="daily temprature", main="Atlanta Daily Temprature Time Series & Trend") 
+lines(temp.gam.fit,col="blue") 
+
+temp.season = lm(temp~season(temp)-1)
+temp.season.fit = ts(fitted(temp.season), start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="daily temprature", main="Atlanta Daily Temprature Time Series & Seasonality") 
+lines(temp.season.fit,col="red") 
+
+## splines+ANOVA seasonality
+temp.lm.gam = gam(temp~s(time.pts)+season(temp)-1)
+temp.lm.gam.fit = ts(fitted(temp.lm.gam),start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="daily temprature", main="Atlanta Daily Temprature Time Series & Trend+Seasonality") 
+lines(temp.lm.gam.fit,col="green") 
+
+# plot the residuals of models
+resid <- residuals(temp.lm.gam)
+resid.fit <- ts(resid,start=c(2002,4,1), freq=52) 
+plot(resid.fit,ylab="daily temprature residuals", main="Atlanta Daily Temprature Residuals") 
+acf(resid.fit, main="ACF:Atlanta Daily Temprature Residuals", na.action = na.pass, lag.max=52*2)
+pacf(resid.fit, main="PACF:Atlanta Daily Temprature Residuals", na.action = na.pass, lag.max=52*2)
+adf.test(resid)
+adf.test(resid^2)
+```
+
+
+
+```{r}
+n = length(temp)
+n_forward=28
+nfit = n-n_forward
+temp.train = temp[1:nfit]
+temp.test = temp[-(1:nfit)]
+
+n = length(temp.train)
+
+test_modelA <- function(p,d,q){
+    mod = arima(temp.train, order=c(p,d,q), method="ML")
+    current.aic <- AIC(mod)
+    current.aic<-current.aic-2*(p+q+1)+2*(p+q+1)*n/(n-p-q-2)
+    df = data.frame(p,d,q,current.aic)
+    names(df) <- c("p","d","q","AIC")
+    #print(paste(p,d,q,current.aic,sep=" "))
+    return(df)
+}
+
+orders <- data.frame(Inf,Inf,Inf,Inf)
+names(orders) <- c("p","d","q","AIC")
+for (p in 0:10){
+    for(d in 0:2) {
+        for (q in 0:10) {
+            possibleError <- tryCatch(
+                orders<-rbind(orders,test_modelA(p,d,q)),
+                error=function(e) {e}
+            )
+            if(inherits(possibleError, "error")) 
+              next
+        }
+    }
+}
+
+orders <- orders[order(-orders$AIC),]
+tail(orders)
+
+AIC_v = orders$AIC 
+AIC_v = sort(AIC_v, decreasing = TRUE)
+AIC_v = AIC_v[-1]
+plot(AIC_v, xlim = c(0,50),ylab = "AIC Values")
+```
+
+
+
+```{r}
+Selected_Order = AIC_v[12]
+orders[orders$AIC==Selected_Order,] 
+
+daily_model <- arima(temp.train, order=c(4,0,3))
+daily_model
+
+select.resids <- residuals(daily_model)
+
+acf(select.resids,main="ARIMA Residuals - Weekly Data",na.action = na.pass,lag.max=52*2)
+acf(select.resids^2,main="ARIMA Squared Residuals - Weekly Data",na.action = na.pass,lag.max=52*2)
+
+# test for serial correlation in residuals
+Box.test(select.resids,lag=8,type='Ljung',fitdf=7)
+# test for serial correlation in squared residuals
+Box.test((select.resids)^2,lag=8,type='Ljung',fitdf=7)
+```
+
+
+```{r}
+nfore = length(temp.test)
+forecast_arima_rolling = NULL
+forecast_se_arima_rolling = NULL
+for(f in 1: nfore){
+    ## Fit models
+    data = temp.train
+    if(f>2)
+       data = c(temp.train,temp.test[1:(f-1)])
+    model_arima = arima(data, order=c(4,0,3))
+    outpred_daily = as.vector(predict(model_arima,n.ahead=1))
+    forecast_arima_rolling = c(forecast_arima_rolling, outpred_daily$pred)
+    forecast_se_arima_rolling = c(forecast_se_arima_rolling, outpred_daily$se)
+}
+
+timevol = time(temp)
+ubound = forecast_arima_rolling+1.96*forecast_se_arima_rolling
+lbound = forecast_arima_rolling-1.96*forecast_se_arima_rolling
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp[(n-100):n],type="l", ylim=c(0,40), xlab="Time", ylab="Temperature", main = "ARIMA Weekly Data")
+points(timevol[(nfit+1):n],forecast_arima_rolling,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+```
+```{r}
+# nfore = length(temp.test)
+# forecast_arima_rolling_2 = NULL
+# forecast_se_arima_rolling_2 = NULL
+# for(f in seq(1,nfore,2)){
+#     ## Fit models
+#     data = temp.train
+#     if(f>2)
+#        data = c(temp.train,temp.test[1:(f-1)])
+#     model_arima_2 = arima(data, order=c(4,0,3))
+#     outpred_daily_2 = as.vector(predict(model_arima_2,n.ahead=2))
+#     forecast_arima_rolling_2 = c(forecast_arima_rolling_2, outpred_daily_2$pred)
+#     forecast_se_arima_rolling_2 = c(forecast_se_arima_rolling_2, outpred_daily_2$se)
+# }
+
+timevol = time(temp)
+ubound = forecast_arima_rolling_2+1.96*forecast_se_arima_rolling_2
+lbound = forecast_arima_rolling_2-1.96*forecast_se_arima_rolling_2
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp[(n-100):n],type="l", ylim=c(0,40), xlab="Time", ylab="Temperature", main = "ARIMA Weekly Data (2-week rolling)")
+points(timevol[(nfit+1):n],forecast_arima_rolling_2,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+```
+
+```{r}
+n = length(temp)
+n_forward=28
+nfit = n-n_forward
+
+forecast_arima = as.vector(predict(daily_model,n.ahead=28))
+timevol = time(temp)
+ubound = forecast_arima$pred+1.96*forecast_arima$se
+lbound = forecast_arima$pred-1.96*forecast_arima$se
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp[(n-100):n],type="l", ylim=c(0,40), xlab="Time", ylab="Temperature", main = "ARIMA Weekly Data (no rolling)")
+points(timevol[(nfit+1):n],forecast_arima$pred,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+```
+
+
+
+```{r}
+#SARIMA
+norder=10
+sorder=2
+p = c(1:norder)-1; q = c(1:norder)-1
+sp = c(1:norder)-1; sq = c(1:norder)-1
+
+aic_sarima_11=matrix(0,norder,norder)
+for(i in 1:norder){
+  for(j in 1:norder){
+    #cat(i,j,'\n')
+    tryCatch({
+      sarima_model_select3 = astsa::sarima(temp.train, p[i], 0, q[j], 1, 0, 1, 52, details=FALSE, Model=FALSE)
+                aic_sarima_11[i,j] = sarima_model_select3$AIC},
+                error=function(e) {}
+            )
+  
+  }  
+}
+
+aic_sarima_11[which(aic_sarima_11==0)] = NA
+which(aic_sarima_11 == min(aic_sarima_11,na.rm=T), arr.ind = TRUE)
+aic_sarima_11[which(aic_sarima_11 == min(aic_sarima_11,na.rm=T), arr.ind = TRUE)]
+
+aic_sarima_11_diff=matrix(0,norder,norder)
+for(i in 1:norder){
+  for(j in 1:norder){
+    #cat(i,j,'\n')
+    tryCatch({
+      sarima_model_select3 = astsa::sarima(temp.train, p[i], 1, q[j], 1, 0, 1, 52, details=FALSE, Model=FALSE)
+                aic_sarima_11_diff[i,j] = sarima_model_select3$AIC},
+                error=function(e) {}
+            )
+  
+  }  
+}
+
+aic_sarima_11_diff[which(aic_sarima_11_diff==0)] = NA
+which(aic_sarima_11_diff == min(aic_sarima_11_diff,na.rm=T), arr.ind = TRUE)
+aic_sarima_11_diff[which(aic_sarima_11_diff == min(aic_sarima_11_diff,na.rm=T), arr.ind = TRUE)]
+```
+
+
+
+```{r}
+sarima.temp = astsa::sarima(temp.train, 6,0,10, 1,0,1, 52)
+sarima_for = sarima.for(temp.train, 28, 6,0,10, 1,0,1, 52)
+pred_SARIMA = sarima_for$pred
+```
+
+
+```{r}
+n = length(temp)
+n_forward=28
+nfit = n-n_forward
+
+timevol = time(temp)
+ubound = sarima_for$pred+1.96*sarima_for$se
+lbound = sarima_for$pred-1.96*sarima_for$se
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp[(n-100):n],type="l", ylim=c(0,40), xlab="Time", ylab="Temperature", main = "SARIMA Weekly Data (no rolling)")
+points(timevol[(nfit+1):n],sarima_for$pred,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+
+sarima_resid <- residuals(sarima.temp$fit)
+
+acf(sarima_resid,main="Residuals - Weekly Data",na.action = na.pass,lag.max=52*2)
+acf(sarima_resid^2,main="SARIMA Squared Residuals - Weekly Data",na.action = na.pass,lag.max=52*2)
+
+# test for serial correlation in residuals
+Box.test(sarima_resid,lag=19,type='Ljung',fitdf=18)
+# test for serial correlation in squared residuals
+Box.test((sarima_resid)^2,lag=19,type='Ljung',fitdf=18)
+```
+
+
+```{r}
+#SARIMA Rolling prediction
+
+nfore = length(temp.test)
+forecast_sarima_rolling_2 = NULL
+forecast_se_sarima_rolling_2 = NULL
+for(f in seq(1,nfore,2)){
+    ## Fit models
+    data = temp.train
+    if(f>2)
+       data = c(temp.train,temp.test[1:(f-1)])
+    #model_arima_2 = arima(data, order=c(4,0,3))
+    #outpred_daily_2 = as.vector(predict(model_arima_2,n.ahead=2))
+    outpred_daily_3 = sarima.for(data, 2, 6,0,10, 1,0,1, 52)
+    forecast_sarima_rolling_2 = c(forecast_sarima_rolling_2, outpred_daily_3$pred)
+    forecast_se_sarima_rolling_2 = c(forecast_se_sarima_rolling_2, outpred_daily_3$se)
+}
+
+timevol = time(temp)
+ubound = forecast_sarima_rolling_2+1.96*forecast_se_sarima_rolling_2
+lbound = forecast_sarima_rolling_2-1.96*forecast_se_sarima_rolling_2
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):(n-2)],temp[(n-100):(n-2)],type="l", ylim=c(0,40), xlab="Time", ylab="Temperature", main = "SARIMA Weekly Data (2-week rolling)")
+points(timevol[(nfit+1):(n-2)],forecast_sarima_rolling_2,col="red")
+lines(timevol[(nfit+1):(n-2)],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):(n-2)],lbound,lty=3,lwd= 2, col="blue")
+
+```
+
+
+```{r}
+#SARIMA
+norder=10
+sorder=2
+p = c(1:norder)-1; q = c(1:norder)-1
+sp = c(1:norder)-1; sq = c(1:norder)-1
+temp.train.log = log(temp.train+(8/3))
+
+aic_sarima_11_log=matrix(0,norder,norder)
+for(i in 1:norder){
+  for(j in 1:norder){
+    #cat(i,j,'\n')
+    tryCatch({
+      sarima_model_select3 = astsa::sarima(temp.train.log, p[i], 0, q[j], 1, 0, 1, 52, details=FALSE, Model=FALSE)
+                aic_sarima_11_log[i,j] = sarima_model_select3$AIC},
+                error=function(e) {}
+            )
+  
+  }  
+}
+
+aic_sarima_11_log[which(aic_sarima_11_log==0)] = NA
+which(aic_sarima_11_log == min(aic_sarima_11_log,na.rm=T), arr.ind = TRUE)
+aic_sarima_11_log[which(aic_sarima_11_log == min(aic_sarima_11_log,na.rm=T), arr.ind = TRUE)]
+
+aic_sarima_11_diff_log=matrix(0,norder,norder)
+for(i in 1:norder){
+  for(j in 1:norder){
+    #cat(i,j,'\n')
+    tryCatch({
+      sarima_model_select3 = astsa::sarima(temp.train.log, p[i], 1, q[j], 1, 0, 1, 52, details=FALSE, Model=FALSE)
+                aic_sarima_11_diff_log[i,j] = sarima_model_select3$AIC},
+                error=function(e) {}
+            )
+  
+  }  
+}
+
+aic_sarima_11_diff_log[which(aic_sarima_11_diff_log==0)] = NA
+which(aic_sarima_11_diff_log == min(aic_sarima_11_diff_log,na.rm=T), arr.ind = TRUE)
+aic_sarima_11_diff_log[which(aic_sarima_11_diff_log == min(aic_sarima_11_diff_log,na.rm=T), arr.ind = TRUE)]
+```
+
+
+
+```{r}
+sarima.temp.log = astsa::sarima(temp.train.log, 3,0,10, 1,0,1, 52)
+sarima_for.log = sarima.for(temp.train.log, 28, 3,0,10, 1,0,1, 52)
+pred_SARIMA.log = sarima_for.log$pred
+
+temp.log = log(temp+(8/3))
+n = length(temp)
+n_forward=28
+nfit = n-n_forward
+
+timevol = time(temp)
+ubound = sarima_for.log$pred+1.96*sarima_for.log$se
+lbound = sarima_for.log$pred-1.96*sarima_for.log$se
+ymin = min(lbound)
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp.log[(n-100):n],type="l", ylim=c(ymin,ymax), xlab="Time", ylab="Temperature", main = "Log SARIMA Weekly Data (no-rolling)")
+points(timevol[(nfit+1):n],sarima_for.log$pred,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+
+sarima_resid.log <- residuals(sarima.temp.log$fit)
+
+acf(sarima_resid.log,main="Residuals - Weekly Data",na.action = na.pass,lag.max=52*4)
+acf(sarima_resid.log^2,main="Log SARIMA Squared Residuals - Weekly Data",na.action = na.pass,lag.max=52*4)
+
+# test for serial correlation in residuals
+Box.test(sarima_resid,lag=16,type='Ljung',fitdf=15)
+# test for serial correlation in squared residuals
+Box.test((sarima_resid)^2,lag=16,type='Ljung',fitdf=15)
+```
+
+
+```{r}
+#SARIMA Rolling prediction
+
+nfore = length(temp.test)
+forecast_sarima_rolling_2.log = NULL
+forecast_se_sarima_rolling_2.log = NULL
+for(f in seq(1,nfore,2)){
+    ## Fit models
+    data = temp.train.log
+    if(f>2)
+       data = c(temp.train.log,log(temp.test[1:(f-1)]+10))
+    #model_arima_2 = arima(data, order=c(4,0,3))
+    #outpred_daily_2 = as.vector(predict(model_arima_2,n.ahead=2))
+    outpred_daily_4 = sarima.for(data, 2, 3,0,10, 1,0,1, 52)
+    forecast_sarima_rolling_2.log = c(forecast_sarima_rolling_2.log, outpred_daily_4$pred)
+    forecast_se_sarima_rolling_2.log = c(forecast_se_sarima_rolling_2.log, outpred_daily_4$se)
+}
+
+timevol = time(temp)
+ubound = forecast_sarima_rolling_2.log+1.96*forecast_se_sarima_rolling_2.log
+lbound = forecast_sarima_rolling_2.log-1.96*forecast_se_sarima_rolling_2.log
+ymin = min(temp.log[(n-100):n])
+ymax = max(ubound)
+
+n = length(temp)
+par(mfrow=c(1,1))
+plot(timevol[(n-100):n],temp.log[(n-100):n],type="l", ylim=c(ymin,ymax), xlab="Time", ylab="Temperature", main = "Log SARIMA Weekly Data (2-week rolling)")
+points(timevol[(nfit+1):n],forecast_sarima_rolling_2.log,col="red")
+lines(timevol[(nfit+1):n],ubound,lty=3,lwd= 2, col="blue")
+lines(timevol[(nfit+1):n],lbound,lty=3,lwd= 2, col="blue")
+```
+
+```{r}
+# Prediction Comparison
+
+mape <- function(y, y_pred) {
+  mape <- mean(abs((y-y_pred)/y))
+  return(mape)
+}
+
+pm <- function(obs, pred) {
+  pm <- sum((pred-obs)^2)/sum((obs-mean(obs))^2)
+  return(pm)
+}
+
+#MAPE
+m1 = mape(temp.test,forecast_arima_rolling)
+m2 = mape(temp.test,forecast_arima_rolling_2)
+m3 = mape(temp.test,forecast_arima$pred)
+m4 = mape(temp.test,sarima_for$pred)
+m5 = mape(temp.test[1:26],forecast_sarima_rolling_2)
+m6 = mape(log(temp.test+(8/3)),sarima_for.log$pred)
+m7 = mape(log(temp.test+(8/3)),forecast_sarima_rolling_2.log)
+
+#PM
+p1 = pm(temp.test,forecast_arima_rolling)
+p2 = pm(temp.test,forecast_arima_rolling_2)
+p3 = pm(temp.test,forecast_arima$pred)
+p4 = pm(temp.test,sarima_for$pred)
+p5 = pm(temp.test[1:26],forecast_sarima_rolling_2)
+p6 = pm(log(temp.test+(8/3)),sarima_for.log$pred)
+p7 = pm(log(temp.test+(8/3)),forecast_sarima_rolling_2.log)
+```
+
+
+```{r}
+prediction_mat = NULL
+for (i in 2:7){
+  prediction_mat = rbind(prediction_mat,data.frame(eval(as.symbol(paste("m",i,sep=''))),eval(as.symbol(paste("p",i,sep='')))))
+}
+rownames(prediction_mat) <- c("ARIMA (2-week rolling)","ARIMA (non-rolling)","SARIMA (non-rolling)","SARIMA (2-week rolling)","SARIMA log transformed (no-rolling)","SARIMA log transformed (2-week rolling)")
+colnames(prediction_mat) <- c("MAPE", "PM")
+prediction_mat
+```
+
+
+```{r}
+ts.sim <- arima.sim(list(order = c(4,0,3), ar = c(1.2990,0.6765,-1.3089,0.3135), ma = c(-0.9686,-0.9860,0.9827)), n = 200)
+ts.plot(ts.sim)
+```
+

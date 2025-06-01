@@ -1,0 +1,189 @@
+---
+title: "SARIMAX"
+author: ""
+date: "4/24/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(vars)
+library(xts)
+library(mgcv)
+library(stats)
+library(tseries)
+library(aod)
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+library(data.table)
+library(stats)
+library(vars)
+
+```
+
+
+```{r}
+## Getting Data
+
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%Y-%m-%d')
+#temp <- ts(atl$tavg, start=c(2002,4,1), freq=365)
+temp = xts(atl$tavg, atl$time)
+temp = apply.weekly(temp, mean, na.rm=TRUE)
+temp <- ts(temp, start=c(2002,4,1), freq=52)
+```
+
+```{r}
+## Data Pre processing
+atl = atl[, c(1,2,5,8,10)] %>% na.omit() 
+temp.log = log(atl[, 2] + 8/3)[-1] %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+n = length(temp.log)
+n_forward=28
+nfit = n-n_forward
+
+temp.log.train =temp.log[1:nfit]
+temp.log.test = temp.log[(nfit + 1):n]
+```
+
+
+```{r}
+## Getting Lagged Exogenous Variables
+
+lagged_exo = sapply(atl[,3:5], function(x) shift(x, 1))[-1, ]
+lagged_prcp.log = log(lagged_exo[, 1] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+lagged_wspd.log = log(lagged_exo[, 2] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+lagged_pres.log = log(lagged_exo[, 3] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+
+exo.lag.log = cbind(lagged_prcp.log, lagged_wspd.log, lagged_pres.log)
+exo.lag.log.train = exo.lag.log[1:nfit]
+exo.lag.log.test = exo.lag.log[(nfit+1):n]
+```
+
+
+```{r include=FALSE}
+## Order Selection - SARIMAX
+
+final.aic = Inf
+final.order = c(0,0,0)
+for (p in 3:5) for (d in 0:1) for (q in 6:7) for(s in 0:1){
+      possibleError <- tryCatch( 
+         current.aic = AIC(arima(temp.log.train, order=c(p, d, q),
+                                 seasonal = list(order=c(1,s,1),period=52), 
+                                 method="ML",xreg=exo.lag.log.train)), 
+         error = function(e) {e} 
+      ) 
+      if (inherits(possibleError, "error")) 
+        next
+   print(q) 
+   if (current.aic < final.aic) {
+     final.aic = current.aic
+     final.order = c(p, 1, q, s)
+
+   }
+}
+final.aic
+final.order
+```
+
+```{r}
+## Model Fitting - SARIMAX
+sarimax_model = arima(temp.log.train, order = c(4,0,6),
+                seasonal = list(order = c(1, 0, 1), period = 52),
+                method="ML", xreg=exo.lag.log.train)
+sarimax_model
+```
+
+
+```{r}
+## Residual analysis
+par(mar=c(5,4,4,2)+0.1)
+#par(mfrow=c(2,2))
+plot(resid(sarimax_model), ylab='Residuals',type='o',main="Residual Plot")
+abline(h=0)
+acf(resid(sarimax_model),lag.max = 52*4,main="ACF: Residuals")
+hist(resid(sarimax_model),xlab='Residuals',main='Histogram: Residuals')
+qqnorm(resid(sarimax_model),ylab="Sample Q",xlab="Theoretical Q")
+qqline(resid(sarimax_model))
+```
+
+
+```{r}
+## Hypothesis Testing
+
+Box.test(sarimax_model$resid, lag = (4+6+2+4+1), type = "Box-Pierce", fitdf = (4+6+2+4))
+Box.test(sarimax_model$resid, lag = (4+6+2+4+1), type = "Ljung-Box", fitdf = (4+6+2+4))
+```
+
+
+
+
+```{r}
+## Rolling Predictions
+
+outpred.28_SARIMA_X = NULL
+ubound.28_SARIMA_X = NULL
+lbound.28_SARIMA_X = NULL
+
+n = length(temp.log)
+for(i in seq(1,28,by=2)){
+   nfit = n-(28-i+1)
+
+   
+   outprice = arima(temp.log[1:nfit], order = c(4, 0, 6),
+                seasonal = list(order = c(1, 0, 1), period = 52),
+                method="CSS", xreg=exo.lag.log[1:nfit])
+   
+   
+   
+
+   pred.1 = predict(outprice,n.ahead=2, newxreg= exo.lag.log[c(nfit+1,nfit+2)])
+   ubound.28_SARIMA_X = c(ubound.28_SARIMA_X, pred.1$pred+1.96*pred.1$se)
+   lbound.28_SARIMA_X = c(lbound.28_SARIMA_X, pred.1$pred-1.96*pred.1$se)
+  
+                                                                            
+   outpred.28_SARIMA_X = c(outpred.28_SARIMA_X,pred.1$pred)
+}
+```
+
+
+```{r}
+## Compute Accuracy Measures 
+### Mean Absolute Percentage Error (MAPE)
+mean(abs(outpred.28_SARIMA_X -temp.log.test)/temp.log.test)
+
+### Precision Measure (PM)
+sum((outpred.28_SARIMA_X -temp.log.test)^2)/sum((temp.log.test-mean(temp.log.test))^2)
+```
+
+
+```{r}
+## Rolling Prediction Plot
+
+n = length(temp.log)
+nfit = n-28
+timevol = time(temp.log)
+ymin = min((c(lbound.28_SARIMA_X)))
+ymax = max((c(ubound.28_SARIMA_X)))
+plot(timevol[(n-100):n],(temp.log[(n-100):n]),type="l",ylim=c(ymin,ymax),xlab="Time", ylab="Log - Temperature")
+points(timevol[(nfit+1):n],(outpred.28_SARIMA_X),col="red")
+lines(timevol[(nfit+1):n],(ubound.28_SARIMA_X),lty=3,lwd= 2, col="purple")
+lines(timevol[(nfit+1):n],(lbound.28_SARIMA_X),lty=3,lwd= 2, col="purple")
+```
+
+

@@ -1,0 +1,176 @@
+---
+title: "Untitled"
+author: "Ahmed Rabbani"
+date: "4/24/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(vars)
+library(xts)
+library(mgcv)
+library(stats)
+library(tseries)
+library(aod)
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+library(data.table)
+library(stats)
+library(vars)
+
+```
+
+
+```{r}
+## Data Pre Processing - Correct
+
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%d-%m-%Y')
+atl = atl[, c(1,2,5,8,10)]
+
+
+log.data = log(atl[2:5] + 8/3) %>% xts(., atl$time) %>%
+  apply.weekly(mean, na.rm=TRUE)
+
+log.data = na.approx(log.data)
+
+log.data.diff = diff(log.data)
+log.data.diff = log.data.diff[-1]
+```
+
+
+```{r}
+## Use Differenced Data Instead of Original Data
+log.data = log.data.diff
+```
+
+
+
+```{r}
+## Train Test Split
+
+temp.log = log.data$tavg
+n = length(temp.log)
+n_forward=28
+nfit = n-n_forward
+
+log.data.train <- log.data[1:nfit,]
+log.data.test <- log.data[(nfit + 1):n]
+
+temp.log.train =temp.log[1:nfit]
+temp.log.test = temp.log[(nfit + 1):n]
+```
+
+
+```{r}
+## VAR X Fitting 2
+bic_order_var = 3
+mod_bic_1 = VAR(cbind(log.data.train$tavg,log.data.train$wspd,log.data.train$pres),p = bic_order_var,exogen = log.data.train$prcp)
+
+
+sink("lm.txt")
+summary(mod_bic_1)
+sink()
+```
+
+
+
+
+```{r}
+## Granger Causality Analysis Tavg
+coef.tavg = coefficients(mod_bic_1)$tavg[-10,1]
+var.tavg = vcov(mod_bic_1)[c(2:11),c(2:11)]
+
+
+#prcp
+wald.test(b=coef.tavg, var.tavg,Terms = c(10))
+
+#windspeed
+wald.test(b=coef.tavg, var.tavg,Terms = c(2,5,8))
+
+#pressure
+wald.test(b=coef.tavg, var.tavg,Terms = c(3,6,9))
+```
+
+
+
+
+
+
+
+```{r}
+# View(coefficients(mod_bic_1)$tavg)
+# View(vcov(mod_bic_1))
+ # View(coef.tavg)
+# View(var.tavg)
+```
+
+
+
+
+
+
+```{r}
+## Predictions
+
+outpred.28_VARX_BIC = NULL
+ubound.28_VARX_BIC  = NULL
+lbound.28_VARX_BIC  = NULL
+
+n = length(temp.log)
+for(i in seq(1,28,by=2)){
+   nfit = n-(28-i+1)
+   #print(c(nfit,i))
+   data_train = cbind(log.data$tavg,log.data$wspd,log.data$pres)[1:nfit]
+   outprice = VAR(data_train,p = bic_order_var,exogen =
+                    log.data$prcp[1:nfit])
+   a = nfit +1
+   b = nfit +2
+   pred.1 = predict(outprice,n.ahead=2,dumvar=log.data$prcp[a:b])
+   outpred.28_VARX_BIC= c(outpred.28_VARX_BIC,pred.1[["fcst"]][["tavg"]][,1])
+   lbound.28_VARX_BIC= c(lbound.28_VARX_BIC,pred.1[["fcst"]][["tavg"]][,2])
+   ubound.28_VARX_BIC= c(ubound.28_VARX_BIC,pred.1[["fcst"]][["tavg"]][,3])
+}
+```
+
+```{r}
+### Prediction Measures
+
+### Mean Absolute Percentage Error (MAPE)
+mean(abs(outpred.28_VARX_BIC - temp.log.test)/temp.log.test)
+
+### Precision Measure (PM)
+sum((outpred.28_VARX_BIC-temp.log.test)^2)/sum((temp.log.test-mean(temp.log.test))^2)
+```
+
+```{r}
+## Rolling Prediction Plot
+
+n = length(temp.log)
+nfit = n-28
+timevol = time(temp.log)
+ymin = min((c(lbound.28_VARX_BIC)))
+ymax = max((c(ubound.28_VARX_BIC)))
+plot(timevol[(n-100):n],(temp.log[(n-100):n]),type="l",ylim=c(ymin,ymax),xlab="Time", ylab="Log - Temperature")
+points(timevol[(nfit+1):n],(outpred.28_VARX_BIC),col="red")
+lines(timevol[(nfit+1):n],(lbound.28_VARX_BIC),lty=3,lwd= 2, col="purple")
+lines(timevol[(nfit+1):n],(ubound.28_VARX_BIC),lty=3,lwd= 2, col="purple")
+```
+
+```{r}
+
+```
+

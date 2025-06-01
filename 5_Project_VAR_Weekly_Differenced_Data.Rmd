@@ -1,0 +1,354 @@
+---
+title: "Untitled"
+author: "Ahmed Rabbani"
+date: "4/24/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(vars)
+library(xts)
+library(mgcv)
+library(stats)
+library(tseries)
+library(aod)
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+library(data.table)
+library(stats)
+library(vars)
+
+
+```
+
+
+
+
+
+```{r}
+## Data Pre Processing
+
+# atl <- read.csv("Atlanta_data.csv", head = TRUE)
+# atl$time<-as.Date(atl$time,format='%Y-%m-%d')
+# atl = atl[, c(1,2,5,8,10)]
+# 
+# 
+# log.data = log(atl[2:5] + 8/3) %>% xts(., atl$time) %>%
+#   apply.weekly(mean, na.rm=TRUE)
+# 
+# log.data = na.approx(log.data)
+# 
+# log.data.diff = diff(log.data)
+# log.data.diff = log.data.diff[-1]
+
+
+```
+
+```{r}
+## Data Pre Processing - Correct
+
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%d-%m-%y')
+atl = atl[, c(1,2,5,8,10)]
+
+
+log.data = log(atl[2:5] + 8/3) %>% xts(., atl$time) %>%
+  apply.weekly(mean, na.rm=TRUE)
+
+log.data = na.approx(log.data)
+
+log.data.diff = diff(log.data)
+log.data.diff = log.data.diff[-1]
+
+```
+
+
+
+
+
+
+```{r}
+
+## Log Data Plots
+par(mar=c(5,4,4,2)+0.1)
+par(mfrow=c(2,2))
+plot.ts(log.data$tavg, main = "Temperature",ylab = "Temperature")
+plot.ts(log.data$prcp, main = "Precipitation",ylab = "Precipitation")
+plot.ts(log.data$wspd, main = "Wind Speed",ylab = "Wind Speed")
+plot.ts(log.data$pres, main = "Pressure",ylab = "Pressure")
+
+## Log Data ACF
+par(mar=c(5,4,4,2)+0.1)
+par(mfrow=c(2,2))
+acf(log.data$tavg,lag.max = 52*4, main = "Temperature")
+acf(log.data$prcp,lag.max = 52*4, main = "Precipitation")
+acf(log.data$wspd,lag.max = 52*4,, main = "Wind Speed")
+acf(log.data$pres,lag.max = 52*4,, main = "Pressure")
+
+## Log Data Plots - Differenced - 1
+par(mar=c(5,4,4,2)+0.1)
+par(mfrow=c(2,2))
+plot.ts(log.data.diff$tavg, main = "Temperature",ylab = "Temperature")
+plot.ts(log.data.diff$prcp, main = "Precipitation",ylab = "Precipitation")
+plot.ts(log.data.diff$wspd, main = "Wind Speed",ylab = "Wind Speed")
+plot.ts(log.data.diff$pres, main = "Pressure",ylab = "Pressure")
+
+
+## Log Data ACF - Differenced - 1
+par(mar=c(5,4,4,2)+0.1)
+par(mfrow=c(2,2))
+acf(log.data.diff$tavg,lag.max = 52*4, main = "Temperature")
+acf(log.data.diff$prcp,lag.max = 52*4, main = "Precipitation")
+acf(log.data.diff$wspd,lag.max = 52*4,, main = "Wind Speed")
+acf(log.data.diff$pres,lag.max = 52*4,, main = "Pressure")
+
+```
+
+
+```{r}
+## Use Differenced Data Instead of Original Data
+log.data = log.data.diff
+```
+
+
+
+```{r}
+## Train Test Split
+
+temp.log = log.data$tavg
+n = length(temp.log)
+n_forward=28
+nfit = n-n_forward
+
+log.data.train <- log.data[1:nfit,]
+log.data.test <- log.data[(nfit + 1):n]
+
+temp.log.train =temp.log[1:nfit]
+temp.log.test = temp.log[(nfit + 1):n]
+```
+
+
+
+
+
+
+```{r}
+## Order Selection
+
+model=VARselect(log.data.train,lag.max=20, type = "both")
+plot(model$criteria[1,] ,xlab ="Order", ylab ="AIC")
+plot(model$criteria[3,] ,xlab ="Order", ylab ="BIC")
+
+
+
+```
+
+```{r}
+## Model Fitting
+bic_order_var = 3
+mod_bic_1 = VAR(log.data.train,p = bic_order_var)
+summary(mod_bic_1)
+
+sink("lm.txt")
+summary(mod_bic_1)
+sink()
+
+```
+
+```{r}
+## Residual Analysis
+model.residuals=residuals(mod_bic_1)
+normality.test(mod_bic_1)
+```
+
+
+```{r}
+arch.test(mod_bic_1)
+```
+
+```{r}
+serial.test((mod_bic_1))
+```
+
+
+
+```{r}
+par(mar=c(5,4,4,2)+0.1)
+par(mfrow=c(1,1))
+#plot(model.residuals, ylab='Residuals',type='o',main="Residual Plot")
+#abline(h=0)
+acf(model.residuals,main="ACF: Residuals",lag.max = 52*4)
+acf(model.residuals^2,main="ACF: Squared Residuals",lag.max = 52*4)
+#hist(model.residuals,xlab='Residuals',main='Histogram: Residuals')
+#qqnorm(model.residuals,ylab="Sample Q",xlab="Theoretical Q")
+#qqline(model.residuals)
+```
+
+
+
+```{r}
+## Variable Selection
+mod_bic_1_restrict = restrict(mod_bic_1)
+summary(mod_bic_1_restrict)
+
+```
+
+```{r}
+## Stepwise Regression
+step.model = step(lm(y~.,data = mod_bic_1$varresult$tavg$model),direction = "backward",steps = 3)
+```
+
+```{r}
+step.model = step(lm(y~.,data = mod_bic_1$varresult$prcp$model),direction = "backward",steps = 3)
+```
+
+```{r}
+step.model = step(lm(y~.,data = mod_bic_1$varresult$wspd$model),direction = "backward",steps = 3)
+```
+
+```{r}
+step.model = step(lm(y~.,data = mod_bic_1$varresult$pres$model),direction = "backward",steps = 3)
+```
+
+
+```{r}
+# View(coefficients(mod_bic_1)$tavg)
+View(coef.tavg)
+# View(var.tavg)
+```
+
+
+
+
+```{r}
+## Granger Causality Analysis Tavg
+coef.tavg = coefficients(mod_bic_1)$tavg[-(4*bic_order_var+1),1]
+var.tavg = vcov(mod_bic_1)[c(2:13),c(2:13)]
+
+
+#prcp
+wald.test(b=coef.tavg, var.tavg,Terms = c(2,6,10))
+
+#windspeed
+wald.test(b=coef.tavg, var.tavg,Terms = c(3,7,11))
+
+#pressure
+wald.test(b=coef.tavg, var.tavg,Terms = c(4,8,12))
+
+```
+
+```{r}
+## Granger Causality Analysis Prcp
+coef.prcp = coefficients(mod_bic_1)$prcp[-(4*bic_order_var+1),1]
+var.prcp = vcov(mod_bic_1)[c(15:26),c(15:26)]
+
+
+#tavg
+wald.test(b=coef.prcp, var.prcp,Terms = c(1,5,9))
+
+#windspeed
+wald.test(b=coef.prcp, var.prcp,Terms = c(3,7,11))
+
+#pressure
+wald.test(b=coef.prcp, var.prcp,Terms = c(4,8,12))
+```
+
+
+```{r}
+## Granger Causality Analysis Wspd
+coef.wspd = coefficients(mod_bic_1)$wspd[-(4*bic_order_var+1),1]
+var.wspd = vcov(mod_bic_1)[c(28:39),c(28:39)]
+
+#tavg
+wald.test(b=coef.wspd, var.wspd,Terms = c(1,5,9))
+
+#prcp
+wald.test(b=coef.wspd, var.wspd,Terms = c(2,6,10))
+
+
+#pressure
+wald.test(b=coef.wspd, var.wspd,Terms = c(4,8,12))
+```
+
+```{r}
+## Granger Causality Analysis Pres
+coef.pres = coefficients(mod_bic_1)$pres[-(4*bic_order_var+1),1]
+var.pres = vcov(mod_bic_1)[c(41:52),c(41:52)]
+
+
+#tavg
+wald.test(b=coef.pres, var.pres,Terms = c(1,5,9))
+
+#prcp
+wald.test(b=coef.pres, var.pres,Terms = c(2,6,10))
+
+#windspeed
+wald.test(b=coef.pres, var.pres,Terms = c(3,7,11))
+
+```
+
+
+
+
+
+
+```{r}
+## Predictions
+
+outpred.28_VAR_BIC = NULL
+ubound.28_VAR_BIC  = NULL
+lbound.28_VAR_BIC  = NULL
+
+n = length(temp.log)
+for(i in seq(1,28,by=2)){
+   nfit = n-(28-i+1)
+   data_train = log.data[1:nfit]
+   outprice = VAR(data_train,p = bic_order_var)
+   pred.1 = predict(outprice,n.ahead=2)
+   outpred.28_VAR_BIC= c(outpred.28_VAR_BIC,pred.1[["fcst"]][["tavg"]][,1])
+   lbound.28_VAR_BIC= c(lbound.28_VAR_BIC,pred.1[["fcst"]][["tavg"]][,2])
+   ubound.28_VAR_BIC= c(ubound.28_VAR_BIC,pred.1[["fcst"]][["tavg"]][,3])
+}
+```
+
+```{r}
+### Prediction Measures
+
+### Mean Absolute Percentage Error (MAPE)
+mean(abs(outpred.28_VAR_BIC - temp.log.test)/temp.log.test)
+
+### Precision Measure (PM)
+sum((outpred.28_VAR_BIC-temp.log.test)^2)/sum((temp.log.test-mean(temp.log.test))^2)
+```
+
+```{r}
+## Rolling Prediction Plot
+
+n = length(temp.log)
+nfit = n-28
+timevol = time(temp.log)
+ymin = min((c(lbound.28_VAR_BIC)))
+ymax = max((c(ubound.28_VAR_BIC)))
+plot(timevol[(n-100):n],(temp.log[(n-100):n]),type="l",ylim=c(ymin,ymax),xlab="Time", ylab="Log - Temperature Differences")
+points(timevol[(nfit+1):n],(outpred.28_VAR_BIC),col="red")
+lines(timevol[(nfit+1):n],(lbound.28_VAR_BIC),lty=3,lwd= 2, col="purple")
+lines(timevol[(nfit+1):n],(ubound.28_VAR_BIC),lty=3,lwd= 2, col="purple")
+```
+
+```{r}
+
+```
+

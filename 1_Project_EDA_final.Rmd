@@ -1,0 +1,97 @@
+---
+title: "Final Project"
+output: pdf_document
+---
+
+```{r}
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+```
+
+```{r}
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%Y-%m-%d')
+#temp <- ts(atl$tavg, start=c(2002,4,1), freq=365)
+temp = xts(atl$tavg, atl$time)
+temp = apply.weekly(temp, mean, na.rm=TRUE)
+temp <- ts(temp, start=c(2002,4,1), freq=52)
+# plot time series
+ts.plot(temp,ylab="daily temprature", main="Atlanta Weekly Temprature Time Series")
+acf(temp, main="ACF:Atlanta Weekly Temprature", na.action = na.pass, lag.max=52*2)
+
+# Correlation Matrix
+prcp = xts(atl$prcp, atl$time)
+prcp = apply.weekly(prcp, mean, na.rm=TRUE)
+prcp <- ts(prcp, start=c(2002,4,1), freq=52)
+
+wspd = xts(atl$wspd, atl$time)
+wspd = apply.weekly(wspd, mean, na.rm=TRUE)
+wspd <- ts(wspd, start=c(2002,4,1), freq=52)
+
+pres = xts(atl$pres, atl$time)
+pres = apply.weekly(pres, mean, na.rm=TRUE)
+pres <- ts(pres, start=c(2002,4,1), freq=52)
+
+atl.ts <- ts.union(temp, prcp, wspd, pres)
+
+plot(atl.ts, type="l",main="")
+pacf(atl.ts)
+cor(atl.ts)
+
+```
+
+
+
+```{r}
+time.pts = c(1:length(temp))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+
+## splines regression to fit daily data 
+temp.gam = gam(temp~s(time.pts))
+temp.gam.fit = ts(fitted(temp.gam), start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="weekly temprature", main="Atlanta Weekly Temprature Time Series & Trend") 
+lines(temp.gam.fit,col="blue") 
+
+temp.season = lm(temp~season(temp)-1)
+temp.season.fit = ts(fitted(temp.season), start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="weekly temprature", main="Atlanta Weekly Temprature Time Series & Seasonality") 
+lines(temp.season.fit,col="red") 
+
+## splines+ANOVA seasonality
+temp.lm.gam = gam(temp~s(time.pts)+season(temp)-1)
+temp.lm.gam.fit = ts(fitted(temp.lm.gam),start=c(2002,4,1), freq=52)
+
+### overlap daily time series
+plot(temp,ylab="weekly temprature", main="Atlanta Weekly Temprature Time Series & Trend+Seasonality") 
+lines(temp.lm.gam.fit,col="green") 
+
+# plot the residuals of models
+resid <- residuals(temp.lm.gam)
+resid.fit <- ts(resid,start=c(2002,4,1), freq=52) 
+plot(resid.fit,ylab="weekly temprature residuals", main="Atlanta Weekly Temprature Residuals") 
+acf(resid.fit, main="ACF:Atlanta Weekly Temprature Residuals", na.action = na.pass, lag.max=52*2)
+pacf(resid.fit, main="PACF:Weekly Temprature Residuals", na.action = na.pass, lag.max=52*2)
+
+# normality test
+hist(resid, main="Histogram: Residuals")
+qqnorm(resid)
+qqline(resid)
+
+# stationarity test
+adf.test(resid)
+```
+
+
+```{r}

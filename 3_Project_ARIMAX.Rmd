@@ -1,0 +1,215 @@
+---
+title: "ARIMAX"
+author: "Tracey"
+date: "4/24/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(vars)
+library(xts)
+library(mgcv)
+library(stats)
+library(tseries)
+library(aod)
+library(dplyr)
+library(zoo) 
+library(lubridate) 
+library(mgcv)
+library(TSA) 
+library(dynlm)
+library(tseries)
+library(xts)
+library(astsa)
+library(rugarch)
+library(data.table)
+library(stats)
+library(vars)
+
+```
+
+```{r}
+## Getting Data
+
+atl <- read.csv("Atlanta_data.csv", head = TRUE)
+atl$time<-as.Date(atl$time,format='%Y-%m-%d')
+#temp <- ts(atl$tavg, start=c(2002,4,1), freq=365)
+temp = xts(atl$tavg, atl$time)
+temp = apply.weekly(temp, mean, na.rm=TRUE)
+temp <- ts(temp, start=c(2002,4,1), freq=52)
+```
+
+```{r}
+## Data Pre processing
+atl = atl[, c(1,2,5,8,10)] %>% na.omit() 
+temp.log = log(atl[, 2] + 8/3)[-1] %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+n = length(temp.log)
+n_forward=28
+nfit = n-n_forward
+timevol = time(temp.log)
+
+temp.log.train =temp.log[1:nfit]
+temp.log.test = temp.log[(nfit + 1):n]
+```
+
+
+```{r}
+## Getting Lagged Exogenous Variables
+
+lagged_exo = sapply(atl[,3:5], function(x) shift(x, 1))[-1, ]
+lagged_prcp.log = log(lagged_exo[, 1] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+lagged_wspd.log = log(lagged_exo[, 2] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+lagged_pres.log = log(lagged_exo[, 3] + 8/3) %>% xts(., atl$time[-1]) %>%
+  apply.weekly(mean, na.rm=TRUE)
+
+exo.lag.log = cbind(lagged_prcp.log, lagged_wspd.log, lagged_pres.log)
+exo.lag.log.train = exo.lag.log[1:nfit]
+exo.lag.log.test = exo.lag.log[(nfit+1):n]
+```
+
+
+```{r}
+plot(timevol, temp.log, type="l",ylim=c(0, 4),xlab="Time", ylab="Log - Temperature")
+plot(timevol,lagged_prcp.log, type="l",ylim=c(1, 3),xlab="Time", ylab="Log - Precipitation")
+ts.plot(lagged_wspd.log)
+ts.plot(lagged_pres.log)
+```
+
+```{r}
+## Order Selection - ARIMAX
+
+final.aic = Inf
+final.order = c(0,0,0)
+for (p in 1:6) for (d in 0:1) for (q in 1:6) {
+   current.aic = AIC(arima(temp.log.train, order=c(p, d,
+                      q),method="ML",xreg=exo.lag.log.train))
+
+   if (current.aic < final.aic) {
+     final.aic = current.aic
+     final.order = c(p, d, q)
+
+   }
+ }
+
+```
+
+
+```{r}
+final.order
+```
+
+```{r}
+## Model Fitting - ARIMAX
+
+arimax_model = arima(temp.log.train, order=c(4,1,6),method="ML",xreg=exo.lag.log.train)
+arimax_model
+```
+
+
+```{r}
+## Residual analysis
+
+par(mar=c(5,4,4,2)+0.1)
+plot(resid(arimax_model), ylab='Residuals',type='o',main="Residual Plot")
+abline(h=0)
+acf(resid(arimax_model),lag.max = 52*4,main="ACF: Residuals")
+hist(resid(arimax_model),xlab='Residuals',main='Histogram: Residuals')
+qqnorm(resid(arimax_model),ylab="Sample Q",xlab="Theoretical Q")
+qqline(resid(arimax_model))
+```
+
+```{r}
+## Hypothesis Testing
+
+Box.test(arimax_model$resid, lag = (4+6+1), type = "Box-Pierce", fitdf = (4+6))
+Box.test(arimax_model$resid, lag = (4+6+1), type = "Ljung-Box", fitdf = (4+6))
+```
+
+```{r}
+## Rolling Predictions
+
+outpred.28_ARIMA_X = NULL
+ubound.28_ARIMA_X = NULL
+lbound.28_ARIMA_X = NULL
+
+n = length(temp.log)
+for(i in seq(1,28,by=2)){
+   nfit = n-(28-i+1)
+   
+   outprice = arima(temp.log[1:nfit], order=c(4,1,
+                      6),method="ML",xreg=exo.lag.log[1:nfit])
+   
+
+   pred.1 = predict(outprice,n.ahead=2, newxreg= exo.lag.log[c(nfit+1,nfit+2)])
+   ubound.28_ARIMA_X = c(ubound.28_ARIMA_X, pred.1$pred+1.96*pred.1$se)
+   lbound.28_ARIMA_X = c(lbound.28_ARIMA_X, pred.1$pred-1.96*pred.1$se)
+  
+                                                                            
+   outpred.28_ARIMA_X = c(outpred.28_ARIMA_X,pred.1$pred)
+}
+```
+
+
+
+
+
+```{r}
+## Compute Accuracy Measures 
+
+### Mean Absolute Percentage Error (MAPE)
+mean(abs(outpred.28_ARIMA_X -temp.log.test)/temp.log.test)
+
+### Precision Measure (PM)
+sum((outpred.28_ARIMA_X -temp.log.test)^2)/sum((temp.log.test-mean(temp.log.test))^2)
+```
+
+
+```{r}
+## Rolling Prediction Plot
+
+n = length(temp.log)
+nfit = n-28
+timevol = time(temp.log)
+ymin = min((c(lbound.28_ARIMA_X)))
+ymax = max((c(ubound.28_ARIMA_X)))
+plot(timevol[(n-100):n],(temp.log[(n-100):n]),type="l",ylim=c(ymin,ymax),xlab="Time", ylab="Log - Temperature")
+points(timevol[(nfit+1):n],(outpred.28_ARIMA_X),col="red")
+lines(timevol[(nfit+1):n],(ubound.28_ARIMA_X),lty=3,lwd= 2, col="purple")
+lines(timevol[(nfit+1):n],(lbound.28_ARIMA_X),lty=3,lwd= 2, col="purple")
+```
+```{r daily}
+temp.daily = xts(atl$tavg, atl$time)
+lagged_prcp.log = log(lagged_exo[, 1] + 8/3) %>% xts(., atl$time[-1]) 
+lagged_wspd.log = log(lagged_exo[, 2] + 8/3) %>% xts(., atl$time[-1]) 
+lagged_pres.log = log(lagged_exo[, 3] + 8/3) %>% xts(., atl$time[-1]) 
+
+exo.lag.daily = cbind(lagged_prcp.log, lagged_wspd.log, lagged_pres.log)
+
+## Order Selection - ARIMAX
+
+final.aic = Inf
+final.order = c(0,0,0)
+for (p in 1:6) for (d in 0:1) for (q in 1:6) {
+   current.aic = AIC(arima(temp.daily[-1], order=c(p, d,
+                      q),method="ML",xreg=lagged_exo))
+
+   if (current.aic < final.aic) {
+     final.aic = current.aic
+     final.order = c(p, d, q)
+
+   }
+}
+final.order
+
+arimax_model = arima(temp.daily[-1], order = c(5,1,4),
+                method="ML", xreg=lagged_exo)
+arimax_model
+```
